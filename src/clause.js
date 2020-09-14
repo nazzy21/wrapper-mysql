@@ -166,7 +166,7 @@ export function groupBy(column, groupOrder = "ASC", table = false) {
         const _val = val.toLowerCase();
 
         if ("asc" === _val || "desc" === _val) {
-            return table ? `${table}.${key} ${val}`;
+            return table ? `${table}.${key} ${val}` : `${key} ${val}`;
         }
 
         return table ? `${val}(${table}.${key})` : `${val}(${key})`;
