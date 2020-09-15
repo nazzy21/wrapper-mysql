@@ -99,8 +99,6 @@ describe("Table Collection", function() {
 		}
 	};
 
-	const table3 = new Collection("TableThree", newSchema, config);
-
 	test("Create", async () => {
 		const [err] = await table.create({engine: "InnoDB"});
 
@@ -120,24 +118,6 @@ describe("Table Collection", function() {
 		table2.schema = newSchema;
 	});
 
-	test("Clone", async () => {
-		// Add data 
-		const [err] = await table2.insert({
-			name: "Samanta"
-		});
-
-		assert.isNull(err);
-
-		const [err2] = await table2.clone("TableThree");
-
-		assert.isNull(err2);
-
-		const [err3, results] = await table3.find();
-
-		assert.isNull(err3);
-		console.log(results);
-	});
-
 	test("Drop", async () => {
 		// Remove the child table first to avoid error
 		const [err] = await table2.drop();
@@ -147,9 +127,5 @@ describe("Table Collection", function() {
 		const [err2] = await table.drop();
 
 		assert.isNull(err2);
-
-		const [err3] = await table3.drop();
-
-		assert.isNull(err3);
 	});
 });
