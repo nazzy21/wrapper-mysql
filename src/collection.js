@@ -1,4 +1,4 @@
-import * as _ from "underscore";
+import * as _ from "./utils";
 import Table from "./table";
 import * as clause from "./clause";
 
@@ -9,14 +9,25 @@ export class Collection extends Table {
      @param {string} name
         The name of the collection. Also use as the name of the table collection in the database.
      @param {object} schema
-        The object which defines the columns where the key property is the column's name.
+        The object which defines the table collection's columns. The key property is the column's name
+        while it's value is another object which sets how a column should be.
         {
             @property {string} type
-                The column type. Options are: Id|ForeignId|DateTime|String|Int|Object|Array|Boolean|
-                Float|Enum
-            @property {boolean} long
-                For column's `String` type. Set to true if the value may contain more than 255
-                characters.
+                The column type. Options are: Id|Date|DateTime|Timestamp|String|Int|Object|Array|Boolean|
+                Float|Enum|ForeignId
+
+                If the column type is `Id`, it is created as unsigned BIG integer which incremented
+                for every new data insertion.
+
+                If the column type is `ForeignId`, it assumes an `Id` of type created on other table collection and
+                is created as BIG  integer width `0` as default value.
+
+                If the column type is `String` and no length specified, it automattically created as LONGTEXT
+                type.
+
+                The values for types `Object` and `Array` are automattically serialized when saving into the
+                database and unserialize when retrieving the data.
+            
             @property {boolean} required
                 Whether the value of the column must be present.
             @property {boolean} index
@@ -27,14 +38,30 @@ export class Collection extends Table {
                 Whether the column's value must be unique.
             @property {array} enum
                 Use to enumerate the values of the column's `Enum` type.
+            @property {object} foreign
+                An object defining the foreign table collections information.
+                {
+                    @property {string} key
+                        A unique constraint key use for reference.
+                    @property {string} name
+                        The name of the table collection, with prefix.
+                    @property {string} column
+                        The column name set in the foreign table collection.
+                    @property {string} onDelete
+                        The reference name to use when the parent forign table collection deleted the row.
+                        Options are `cascade`, `strict`, `null` or `default`
+                    @property {string} onUpdate
+                        The reference name to use when the parent forign table collection row is updated.
+                        Options are `cascade`, `strict`, `null` or `default`
+                }
             @property {*|function} defaultValue
                 The value to use if there's no value set during insert operation.
-                When a function is set, it automatically consist of the following parameters:
+                If the set value is a callable function, the function takes the following parameters:
                 {
-                    @param {*} value
                     @param {object} columns
                     @param {object} error
                         Use to set an error when needed.
+                    @param {object<Collection>} collection
                 }
             @property {function} validate
                 A function to execute to validate the column's value during insert and update operation.
@@ -45,6 +72,7 @@ export class Collection extends Table {
                         The list of columns.
                     @param {object} error
                         An error object container to use set an error.
+                    @param {object<Collection>} collection
                 }
         }
      @param {object} config
@@ -53,14 +81,12 @@ export class Collection extends Table {
     constructor(name, schema, config = false, onCached = null, onClearCached = null) {
         super(name, schema, config);
 
-        // Bind methods for convenience
         this.cachedData = Object.create(null);
         this.onCached = onCached;
         this.onClearCached = onClearCached;
 
-        this.__maybeClearCached = this.__maybeClearCached.bind(this);
-        this.__maybeReturnId = this.__maybeReturnId.bind(this);
-        this.__maybeReturnIds = this.__maybeReturnIds.bind(this);
+        // Bind methods for convenience
+        this.__filterResult = this.__filterResult.bind(this);
     }
 
     /**
@@ -73,15 +99,14 @@ export class Collection extends Table {
     **/
     async insert(columns) {
         const error = {},
-            _columns = await this.__prepareColumns(columns, true, error);
+            _columns = await this.__prepareColumnsForInsert(columns, error);
 
         if (!_.isEmpty(error)) {
             return [_.setError(error.message, error.code)];
         }
 
         return this.exec(`INSERT INTO ?? SET ?`, [this.getName(), _columns])
-            .then(this.__maybeClearCached)
-            .then(this.__maybeReturnId);
+            .then(this.__filterResult);
     }
 
     /**
@@ -100,7 +125,7 @@ export class Collection extends Table {
                 return [_.setError(error.message, error.code)];
             }
 
-            const _column = await this.__prepareColumns(column, this.schema, true, error, this);
+            const _column = await this.__prepareColumnsForInsert(column, this.schema, error);
 
             list.push(_column);
         }
@@ -109,8 +134,7 @@ export class Collection extends Table {
             values = list.map(Object.values);
 
         return this.exec(`INSERT INTO ?? (??) VALUES ?`, [this.getName(), keys, values])
-            .then(this.__maybeClearCached)
-            .then(this.__maybeReturnIds);
+            .then(this.__filterResult);
     }
 
     /**
@@ -124,7 +148,7 @@ export class Collection extends Table {
     **/
     async update(columns, conditions = {}) {
         const error = {},
-            _columns = await this.__prepareColumns(columns, false, error);
+            _columns = await this.__prepareColumnsForUpdate(columns, error);
 
         if (!_.isEmpty(error)) {
             return [_.setError(error.message, error.code)];
@@ -138,8 +162,7 @@ export class Collection extends Table {
         sql += this.__getConditions(conditions, format);
 
         return this.exec(sql, format)
-            .then(this.__maybeClearCached)
-            .then(this.__returnTrue);
+            .then(this.__filterResult);
     }
 
     /**
@@ -157,9 +180,7 @@ export class Collection extends Table {
         // Get conditions
         sql += this.__getConditions(conditions, format);
 
-        return this.exec(sql, format)
-            .then(this.__maybeClearCached)
-            .then(this.__returnTrue);
+        return this.exec(sql, format).then(this.__filterResult);
     }
 
     /**
@@ -177,10 +198,10 @@ export class Collection extends Table {
             cached = await this.__getCached(cachedKey);
 
         if (!_.isEmpty(cached)) {
-            //return [null, cached];
+            return [null, cached];
         }
 
-        const {columns, where, page, perPage} = conditions;
+        const {columns} = conditions;
 
         let table = this.getName(),
             _columns = this.__prepareColumnsForQuery(columns),
@@ -197,12 +218,12 @@ export class Collection extends Table {
      Returns a single row data from the database.
 
      @param {string} columns
-     @param {object} where
+     @param {object} whereClause
         The set of conditions to met prior to retrieving the data.
      @returns {Promise<[Error, Object]>}
     **/
-    findOne(columns, where = {}) {
-        return this.find({columns, where}).then(res => this.__returnOne(res));
+    findOne(columns, whereClause = {}) {
+        return this.find({columns, whereClause}).then(res => this.__returnOne(res));
     }
 
     /**
@@ -210,12 +231,12 @@ export class Collection extends Table {
 
      @param {string} column
         The name of the table's column to get the data from.
-     @param {object} where
+     @param {object} whereClause
         The set of conditions to met prior to retrieving the column value.
      @returns {Promise<[Error, *]>}
     **/
-    getValue(column, where = {}) {
-        return this.findOne(column, where).then(res => this.__returnValue(res, column));
+    getValue(column, whereClause = {}) {
+        return this.findOne(column, whereClause).then(res => this.__returnValue(res, column));
     }
 
     /**
@@ -241,7 +262,8 @@ export class Collection extends Table {
         if (results && !_.isEmpty(results)) {
             const _results = this.__prepareColumnsForDisplay(results);
 
-            _.define(this.cachedData, key, _results);
+            // Save the results
+            this.cachedData[key] = _results;
 
             return [null, _results];
         }
@@ -325,62 +347,53 @@ export class Collection extends Table {
 
     /**
      @private
-     @callback
     **/
-    async __prepareColumns(columns, isInsert = false, error) {
-        let _columns = {},
+    async __prepareColumnsForInsert(columns, error) {
+        const _columns = {},
             schema = this.schema;
 
-        for(const key of Object.keys(schema)) {
+        for(const key of _.keys(schema)) {
             let def = schema[key],
                 value = columns[key];
 
-            // Ignore default types unless there's a value.
-            if (_.contains(["Id", "DateTime", "Timestamp"], def.type)) {
-                if (value) {
-                    _columns[key] = value;
-                }
-
+            // Ignore auto generated values
+            if (_.contains(["Id", "Date", "DateTime", "Timestamp"], def.type)) {
                 continue;
             }
 
-            if (isInsert && _.isUndefined(value)) {
-                // Get default value
+            // Maybe set the default value if the value is missing
+            if (!value || _.isUndefined(value)) {
                 if (def.defaultValue) {
-                    if (_.isFunction(def.defaultValue)) {
-                        value = await def.defaultValue.call(null, value, columns, error);
-                    } else {
-                        value = def.defaultValue;
+                    value = def.defaultValue;
+
+                    if (_.isFunction(value)) {
+                        value = value.call(null, columns, error, this);
                     }
                 }
 
-                if (_.isUndefined(value)) {
-                    if (def.required) {
-                        error.message = "Missing required value!";
-                        error.code = `missing_${key}`;
+                if (def.required && _.isEmpty(value)) {
+                    error.message = `Missing required value for ${key}!`;
+                    error.code = 'missing_value';
 
-                        return _columns;
-                    }
-                    
-                    continue;
+                    return _columns; // No need to go further is an error occured
                 }
             }
 
-            if (!isInsert && _.isUndefined(value)) {
-                continue;
+            if ("Boolean" === def.type) {
+                value = !!value ? 1 : 0;
             }
 
+            // Check validation
             if (def.validate) {
-                const context = isInsert ? "insert" : "update";
+                value = await def.validate.call(null, value, columns, "insert", error, this);
 
-                value = await def.validate.call(null, value, columns, context, error);
-
-                if (!_.isEmpty(error)) {
+                if (error && error.message) {
                     return _columns;
                 }
             }
 
-            if (_.isObject(value) || _.isArray(value)) {
+            // Maybe serialize?
+            if (_.contains(["Object", "Array"], def.type)) {
                 value = _.serialize(value);
             }
 
@@ -393,7 +406,35 @@ export class Collection extends Table {
     /**
      @private
     **/
-    __maybeReturnId([err, result]) {
+    async __prepareColumnsForUpdate(columns, error) {
+        let _columns = _.clone(columns),
+            schema = this.schema;
+
+        for(const key of _.keys(schema)) {
+            let def = schema[key],
+                value = columns[key];
+
+            // Validate the given value
+            if (def.validate) {
+                value = await def.validate.call(null, value, columns, "update", error);
+
+                if (error && error.message) {
+                    return _columns;
+                }
+            }
+
+            // Maybe serialize
+            if (_.contains(["Object", "Array"], def.type)) {
+                value = _.serialize(value);
+            }
+
+            _columns[key] = value;
+        }
+
+        return _columns;
+    }
+
+    __filterResult([err, result]) {
         if (err) {
             return [err];
         }
@@ -401,28 +442,28 @@ export class Collection extends Table {
         // Clear caches
         this.__clearCached();
 
-        return [null, result.insertId||result.affectedRows > 0];
-    }
+        // Return an IDs if existed
+        if (result.insertId) {
+            if (result.affectedRows > 1) {
+                // Get the last inserted id
+                let lastId = result.insertId,
+                    ids = [];
 
-    /**
-     @private
-    **/
-    __maybeReturnIds([err, results]) {
-        if (err) {
-            return [err];
+                for (let i = 0; i < result.affectedRows; i++) {
+                    ids.push(i+lastId);
+                }
+
+                return [null, ids];
+            }
+
+            return [null, result.insertId];
         }
 
-        this.__clearCached();
-
-        // Get the last inserted id
-        let lastId = results.insertId,
-            ids = [];
-
-        for (let i = 0; i < results.affectedRows; i++) {
-            ids.push(i+lastId);
+        if (result.affectedRows) {
+            return [null, !!result.affectedRows];
         }
 
-        return [null, ids];
+        return [null, result];
     }
 
     /**
@@ -469,15 +510,26 @@ export class Collection extends Table {
 
         const schema = this.schema;
 
-        for(const column of Object.keys(columns)) {
-            const def = schema[column];
+        for(const column of _.keys(columns)) {
+            const def = schema[column],
+                value = columns[column];
 
             if (_.isUndefined(def)) {
                 continue;
             }
 
-            if (_.contains(["Object", "Array"], def.type)) {
-                columns[column] = _.unserialize(columns[column]);
+            switch(def.type) {
+                case "Boolean" :
+                    columns[column] = !!parseInt(value);
+                    break;
+
+                case "Object" :
+                    columns[column] = !_.isEmpty(value) ? _.unserialize(value) : {};
+                    break;
+
+                case "Array" :
+                    columns[column] = !_.isEmpty(value) ? _.unserialize(value) : [];
+                    break;
             }
         }
 

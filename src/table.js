@@ -1,4 +1,4 @@
-import {isEmpty, indexOf, isEqual} from "underscore";
+import * as _ from "./utils";
 import {Connect} from "./connect";
 
 /**
@@ -59,11 +59,8 @@ export default class Table extends Connect {
             columns.push('Index (`' + indexes.join('`,`') + '`)');
         }
 
-        if (!isEmpty(options)) {
-            for(const key in options) {
-                if (!options.hasOwnProperty(key)) {
-                    continue;
-                }
+        if (!_.isEmpty(options)) {
+            for(const key of _.keys(options)) {
                 _options.push(`${key}=${options[key]}`);
             }
         }
@@ -78,9 +75,9 @@ export default class Table extends Connect {
      Alter the table structure in the database.
 
      @param {object} oldSchema
-        An object schema which previously used to create the table collection.
+        An object schema which was previously used to create the table collection.
      @param {object} newSchema
-        A new set of object which redefines how a table structure is. If omitted, will use the schema use to defined
+        A new set of object which redefines how a table collection structure is. If omitted, will use the schema use to defined
         by the sub-class.
      @param {object} options
         Additional table options to define how a table structure is.
@@ -90,93 +87,120 @@ export default class Table extends Connect {
         // Mark for multiple transactions
         this.multi();
 
-        if (!newSchema || isEmpty(newSchema)) {
+        if (!newSchema || _.isEmpty(newSchema)) {
             newSchema = this.schema;
         }
 
-        let [, indexes] = this.__mapColumnStructure(oldSchema),
-            format = [this.getName()],
+        const format = [this.getName()],
             sql = [],
-            newColumns = {},
-            updateColumns = {};
+            newIndexes = [],
+            dropIndexes = [],
+            newContraint = [];
 
-        for(const name in newSchema) {
-            if (!newSchema.hasOwnProperty(name)) {
+        for(const key of _.keys(oldSchema)) {
+            const oldColumn = oldSchema[key];
+
+            if (!newSchema[key]) {
+    
+                sql.push(`DROP COLUMN ??`);
+                format.push(key);
+
+                if (oldColumn.index) {
+                    dropIndexes.push(key);
+                }
+
+                if (oldColumn.foreign) {
+                    sql.push(`DROP FOREIGN KEY ${oldColumn.foreign.key}`);
+                }
+
                 continue;
             }
 
-            const column = newSchema[name];
+            if (!_.isEqual(oldColumn, newSchema[key])) {
+                const _old = _.clone(oldColumn),
+                    _new = _.clone(newSchema[key]);
 
-            if (!oldSchema[name]) {
-                newColumns[name] = column;
-                continue;
-            }
+                // Check index
+                if (_old.index && !_new.index) {
+                    // Remove index
+                    dropIndexes.push(key);
 
-            if (!isEqual(oldSchema[name], column)) {
-                updateColumns[name] = column;
+                    delete _old.index;
+                } else if (!_old.index && _new.index) {
+                    newIndexes.push(key);
+
+                    delete _new.index;
+                }
+
+                // Check foreign
+                if (_old.foreign && !_new.foreign) {
+                    // Drop contraint
+                    sql.push(`DROP FOREIGN KEY ??`);
+                    format.push(_old.foreign.key);
+
+                    delete _old.foreign;
+                } else if (!_old.foreign && _new.foreign) {
+                    // Add contraint
+                    sql.push("ADD " + this.__contraint(key, _new));
+
+                    delete _new.foreign;
+                } else if (_old.foreign && _new.foreign) {
+                    // Check the key
+                    if (_old.foreign.key !== _new.foreign.key) {
+                        // Remove foreign key
+                        sql.push(`DROP FOREIGN KEY ??`);
+                        format.push(_old.foreign.key);
+
+                        sql.push("ADD " + this.__contraint(key, _new));
+                    }
+
+                    delete _old.foreign;
+                    delete _new.foreign;
+                }
+
+                if (_.isEqual(_.serialize(_old), _.serialize(_new))) {
+                    continue;
+                }
+
+                const [newColumn, _indexes] = this.__mapColumnStructure(_.object([key], [_new]));
+
+                // Add the column
+                sql.push(`CHANGE COLUMN ?? ${newColumn.join(", ")}`);
+                format.push(key);
             }
         }
 
-        let newIndexes = [],
-            delIndexes = [];
-
-        if (!isEmpty(newColumns)) {
-            let [newCols, indexes] = this.__mapColumnStructure(newColumns);
-
-            if (newCols) {
-                sql.push('ADD ' + newCols.join(', ADD ') );
-            }
-
-            newIndexes = indexes;
-        }
-
-        for(const key in updateColumns) {
-            if (!updateColumns.hasOwnProperty(key)) {
+        // Get new columns
+        for(const key of _.keys(newSchema)) {
+            if (oldSchema[key]) {
                 continue;
             }
 
-            const col = {};
-            col[name] = updateColumns[key];
+            const obj = _.object([key], [newSchema[key]]),
+                [newColumn, _indexes] = this.__mapColumnStructure(obj);
 
-            const [def, index] = this.__mapColumnStructure(col);
+            // Add columns
+            sql.push(`ADD COLUMN ${newColumn.join(" ")}`);
 
-            sql.push(`CHANGE COLUMN ?? ${def.join(" ")}`);
-            format.push(name);
-
-            if (isEmpty(index)) {
-                continue;
-            }
-
-            const pos = indexOf(indexes, name);
-
-            if (!pos) {
-                newIndexes.push(name);
-                continue;
-            }
-
-            delIndexes.push(name);
-        }
-
-        // Get deletable columns
-        for(const key in oldSchema) {
-            if (!oldSchema.hasOwnProperty(key)) {
-                continue;
-            }
-
-            if (newSchema[key]) {
-                continue;
-            }
-
-            sql.push(`DROP COLUMN ??`);
-            format.push(key);
-
-            if (indexOf(indexes, key) >= 0) {
-                delIndexes.push(key);
+            if (_indexes.length) {
+                newIndexes.push(key);
             }
         }
 
-        // Alter current collection table
-        let [err] = await this.exec(`ALTER TABLE ?? ` + sql.join(', '), format);
+        // Alter the table structure in the database
+        let sqlString = `ALTER TABLE ?? ${sql.join(", ")}`;
+
+        if (options && !_.isEmpty(options)) {
+            const _options = [];
+
+            for(const _key of _.keys(options)) {
+                _options.push(`${_key}=${options[key]}`);
+            }
+
+            sqlString += _options.join(", ");
+        }
+
+        const [err] = await this.exec(sqlString, format);
 
         if (err) {
             this.end();
@@ -184,22 +208,16 @@ export default class Table extends Connect {
             return [err];
         }
 
-        // Create new indexes
-        if (newIndexes.length) {
-            let [err2] = await this.exec('CREATE INDEX ?? ON ??', [newIndexes, this.getName()]);
-
-            if (err2) {
-                this.end();
-
-                return [err2];
+        // Remove indexes if there's any
+        if (dropIndexes.length) {
+            for(const index of dropIndexes) {
+                await this.exec(`DROP INDEX ?? ON ??`, [index, this.getName()]);
             }
         }
 
-        // Remove indexes
-        if (delIndexes.length) {
-            for(const index of delIndexes) {
-                await this.exec(`DROP INDEX ?? ON ??`, [index, this.getName()]);
-            }
+        // Add new index
+        if (newIndexes.length) {
+            await this.exec('CREATE INDEX ?? ON ??', [newIndexes, this.getName()]);
         }
 
         this.end();
@@ -217,18 +235,6 @@ export default class Table extends Connect {
     }
 
     /**
-     Copy table to a new table collection.
-
-     @param {string} newName
-     @returns {Promise<[Error, Boolean]>}
-    **/
-    clone(newName) {
-        newName = this.transport.getPrefix() + newName.toLowerCase();
-
-        return this.exec('CREATE TABLE IF NOT EXISTS ?? LIKE ??', [this.getName(), newName]).then(this.__returnTrue);
-    }
-
-    /**
      Helper method to return with a boolean result.
 
      @private
@@ -236,6 +242,29 @@ export default class Table extends Connect {
     **/
     __returnTrue([err, done]) {
         return [err, !!done];
+    }
+
+    /**
+     @private
+    **/
+    __contraint(name, def) {
+        const foreign = [`CONSTRAINT ${def.foreign.key}`, `FOREIGN KEY (${name})`, `REFERENCES ${def.foreign.name}(${def.foreign.column})`],
+            ref = {
+                cascade: "CASCADE",
+                strict: "STRICT",
+                null: "SET NULL",
+                default: "SET DEFAULT"
+            };
+
+        if (def.foreign.onDelete) {
+            foreign.push(`ON DELETE ${ref[def.foreign.onDelete.toLowerCase()]}`);
+        }
+
+        if (def.foreign.onUpdate) {
+            foreign.push(`ON UPDATE ${ref[def.foreign.onUpdate.toLowerCase()]}`);
+        }
+
+       return foreign.join(" ");
     }
 
     /**
@@ -249,14 +278,11 @@ export default class Table extends Connect {
     **/
     __mapColumnStructure(schema) {
             const columns = [],
-            indexes = [];
+            indexes = [],
+            foreignColumns = [];
 
-        for(const name in schema) {
-            if (!schema.hasOwnProperty(name)) {
-                continue;
-            }
-
-            const def = Object.create(schema[name]);
+        for(const name of _.keys(schema)) {
+            const def = schema[name];
 
             let column = [`\`${name}\``],
                 isDate = false;
@@ -268,7 +294,7 @@ export default class Table extends Connect {
                     break;
 
                 case 'String' :
-                    if (!def.length || def.long) {
+                    if (!def.length) {
                         column.push(`LONGTEXT`);
                         break;
                     }
@@ -278,7 +304,7 @@ export default class Table extends Connect {
                     break;
 
                 case 'ForeignId' :
-                    column.push('BIGINT(20)');
+                    column.push('BIGINT(20) UNSIGNED');
                     break;
 
                 case 'Enum' :
@@ -301,6 +327,7 @@ export default class Table extends Connect {
                     column.push('CHAR(1)');
                     break;
 
+                case 'Date' :
                 case 'DateTime' :
                 case 'Timestamp' :
                     isDate = true;
@@ -308,7 +335,8 @@ export default class Table extends Connect {
                     break;
 
                 case 'Float' :
-                    column.push(`FLOAT(4)`);
+                    const fLength = def.length||4;
+                    column.push(`FLOAT(${fLength})`);
                     break;
             }
 
@@ -322,6 +350,10 @@ export default class Table extends Connect {
 
             if (def.primary) {
                 column.push('PRIMARY KEY');
+            }
+
+            if (def.foreign) {
+                foreignColumns.push(this.__contraint(name, def));
             }
 
             if (isDate) {
@@ -339,6 +371,10 @@ export default class Table extends Connect {
             }
 
             columns.push(column.join(' '));
+        }
+
+        if (foreignColumns.length) {
+            columns.push(foreignColumns.join(" "));
         }
 
         return [columns, indexes];

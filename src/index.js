@@ -20,4 +20,4 @@ export async function assert(config) {
     return conn.verify();
 }
 
-export {Connect, Collection};
+export {Collection};
