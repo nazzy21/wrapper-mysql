@@ -248,7 +248,8 @@ export default class Table extends Connect {
      @private
     **/
     __contraint(name, def) {
-        const foreign = [`CONSTRAINT ${def.foreign.key}`, `FOREIGN KEY (${name})`, `REFERENCES ${def.foreign.name}(${def.foreign.column})`],
+        const table = this.getPrefix() + def.foreign.name, 
+            foreign = [`CONSTRAINT ${def.foreign.key}`, `FOREIGN KEY (${name})`, `REFERENCES ${table}(${def.foreign.column})`],
             ref = {
                 cascade: "CASCADE",
                 strict: "STRICT",

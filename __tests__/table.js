@@ -48,7 +48,7 @@ describe("Table Collection", function() {
 				unsigned: true,
 				foreign: {
 					key: 'tester_foreign',
-					name: table.getName(),
+					name: "FirstTable",
 					column: "Id",
 					onDelete: "cascade",
 					onUpdate: "cascade"

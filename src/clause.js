@@ -87,6 +87,12 @@ export function whereClause(where, format, table) {
             continue;
         }
 
+        if (_.contains(["$isNull", "$exist"], value)) {
+            sql.push(`${table}.${key} ${operators[value]}`);
+
+            continue;
+        }
+
         sql.push(`${table}.${key} = ?`);
         format.push(value);
     }

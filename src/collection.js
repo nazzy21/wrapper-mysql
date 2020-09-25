@@ -223,7 +223,7 @@ export class Collection extends Table {
      @returns {Promise<[Error, Object]>}
     **/
     findOne(columns, whereClause = {}) {
-        return this.find({columns, whereClause}).then(res => this.__returnOne(res));
+        return this.find({columns, where: whereClause}).then(res => this.__returnOne(res));
     }
 
     /**
@@ -237,6 +237,10 @@ export class Collection extends Table {
     **/
     getValue(column, whereClause = {}) {
         return this.findOne(column, whereClause).then(res => this.__returnValue(res, column));
+    }
+
+    count(column, where) {
+        return this.getValue({$fn: "COUNT", column, as: column}, where);
     }
 
     /**
@@ -407,7 +411,7 @@ export class Collection extends Table {
      @private
     **/
     async __prepareColumnsForUpdate(columns, error) {
-        let _columns = _.clone(columns),
+        let _columns = {},
             schema = this.schema;
 
         for(const key of _.keys(schema)) {
@@ -482,15 +486,15 @@ export class Collection extends Table {
 
         // TODO: column object
         if (_.isObject(columns)) {
-            const {$fn, column, as} = columns;
+            const {$fn, column} = columns;
 
             let _column = column;
             if ($fn) {
                 _column = `${$fn}(${column})`;
             }
 
-            if (as) {
-                _column += ` AS ${as}`;
+            if (columns.as) {
+                _column += ` AS ${columns.as}`;
             }
 
             return _column;
